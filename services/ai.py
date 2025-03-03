@@ -32,10 +32,11 @@ class AIService:
             # Preparar el contexto y el mensaje
             prompt = self._prepare_prompt(context, history[-3:], message)
             
-            # Generar respuesta con timeout
-            response = await asyncio.wait_for(
-                asyncio.to_thread(self._generate_response_sync, prompt),
-                timeout=20.0
+            # Generar respuesta de forma asíncrona
+            response = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                self._generate_response_sync,
+                prompt
             )
             
             # Validar y limpiar la respuesta
