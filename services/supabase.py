@@ -1,132 +1,141 @@
-from dependencies import get_supabase
-from typing import Optional, List
+import os
+from supabase import create_client, Client
 import logging
-import uuid
+from typing import List, Dict, Any, Optional
+import asyncio
+from fastapi import HTTPException
 
-logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class SupabaseService:
     def __init__(self):
-        self.client = get_supabase()
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_KEY')
+        
+        if not supabase_url or not supabase_key:
+            raise ValueError("SUPABASE_URL y SUPABASE_KEY son requeridos")
+        
+        self.client = create_client(supabase_url, supabase_key)
 
-    def get_chatbot_config(self, chatbot_id: str) -> Optional[dict]:
+    async def save_message(self, message_data: Dict[str, Any]) -> None:
+        """Guarda un mensaje en la base de datos"""
         try:
-            result = self.client.table('chatbots')\
-                .select('*')\
-                .eq('id', chatbot_id)\
-                .execute()
-            logging.debug(f"Obteniendo configuración del chatbot: {result.data}")
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logging.error(f"Error al obtener configuración del chatbot: {e}")
-            return None
-    
-    def get_study_plan(self, program_id: str) -> Optional[dict]:
-        try:
-            # Validar que program_id sea un UUID válido y no sea el literal 'string'
-            if program_id == 'string':
-                return None
-                
-            try:
-                uuid.UUID(program_id)
-            except ValueError:
-                logging.error(f"ID de programa inválido: {program_id}")
-                return None
-
-            # Buscar el plan de estudio activo más reciente
-            result = self.client.table('planes_estudio')\
-                .select('url_imagen,url_pdf,titulo')\
-                .eq('programa_id', program_id)\
-                .eq('activo', True)\
-                .order('fecha_actualizacion', desc=True)\
-                .limit(1)\
-                .execute()
+            required_fields = ['conversacion_id', 'emisor_tipo', 'emisor_id', 'contenido']
+            for field in required_fields:
+                if field not in message_data:
+                    raise ValueError(f"Campo requerido faltante: {field}")
             
-            logging.debug(f"Obteniendo plan de estudios: {result.data}")
+            await asyncio.to_thread(
+                self.client.table('mensajes').insert(message_data).execute
+            )
+            logger.debug(f"Mensaje guardado: {message_data['conversacion_id']}")
+        
+        except Exception as e:
+            logger.error(f"Error al guardar mensaje: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al guardar mensaje: {str(e)}"
+            )
+
+    async def get_chatbot_config(self, chatbot_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene la configuración de un chatbot"""
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table('chatbots')
+                    .select('*')
+                    .eq('id', chatbot_id)
+                    .single()
+                    .execute()
+            )
+            return result.data if result else None
+        
+        except Exception as e:
+            logger.error(f"Error al obtener configuración del chatbot: {e}")
+            return None
+
+    async def get_conversation_history(self, conversation_id: str) -> List[str]:
+        """Obtiene el historial de una conversación"""
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table('mensajes')
+                    .select('contenido')
+                    .eq('conversacion_id', conversation_id)
+                    .order('timestamp')
+                    .execute()
+            )
+            return [msg['contenido'] for msg in result.data] if result.data else []
+        
+        except Exception as e:
+            logger.error(f"Error al obtener historial de conversación: {e}")
+            return []
+
+    async def get_program_mentions(self, history: List[str]) -> List[str]:
+        """Obtiene menciones de programas en el historial"""
+        try:
+            # Obtener todos los programas
+            result = await asyncio.to_thread(
+                lambda: self.client.table('programas_academicos')
+                    .select('id, nombre')
+                    .execute()
+            )
+            
             if not result.data:
-                return None
-                
-            plan = result.data[0]
-            return {
-                'titulo': plan.get('titulo', ''),
-                'url_pdf': plan.get('url_imagen') or plan.get('url_pdf')
-            }
-        except Exception as e:
-            logging.error(f"Error al obtener plan de estudios: {e}")
-            return None
-    
-    def get_available_programs(self) -> List[dict]:
-        """Obtiene una lista de programas académicos disponibles"""
-        try:
-            result = self.client.table('programas_academicos')\
-                .select('id,nombre,nivel')\
-                .order('nombre')\
-                .execute()
-            return result.data if result.data else []
-        except Exception as e:
-            logging.error(f"Error al obtener programas disponibles: {e}")
-            return []
-    
-    def save_message(self, message_data: dict):
-        try:
-            valid_fields = {
-                'conversacion_id': message_data.get('conversacion_id'),
-                'emisor_tipo': message_data.get('emisor_tipo'),
-                'emisor_id': message_data.get('emisor_id'),
-                'contenido': message_data.get('contenido')
-            }
-            logging.debug(f"Guardando mensaje con campos: {valid_fields}")
-            return self.client.table('mensajes').insert(valid_fields).execute()
-        except Exception as e:
-            logging.error(f"Error al guardar mensaje: {e}")
-            raise
-    
-    def get_program_mentions(self, history: List[str]) -> List[str]:
-        try:
-            # Obtener todos los programas para buscar menciones
-            programs = self.client.table('programas_academicos').select('id', 'nombre').execute()
-            logging.debug(f"Obteniendo programas para buscar menciones: {programs.data}")
-            mentioned_programs = []
+                return []
             
-            for message in history:
-                for program in programs.data:
-                    if program['nombre'].lower() in message.lower():
-                        mentioned_programs.append(program['id'])
+            # Buscar menciones en el historial
+            mentions = []
+            for programa in result.data:
+                if any(programa['nombre'].lower() in msg.lower() for msg in history):
+                    mentions.append(programa['id'])
             
-            logging.debug(f"Menciones de programas encontradas: {mentioned_programs}")
-            return mentioned_programs
+            return mentions
+        
         except Exception as e:
-            logging.error(f"Error al buscar menciones de programas: {e}")
+            logger.error(f"Error al buscar menciones de programas: {e}")
             return []
-    
-    def get_program_info(self, program_id: str) -> Optional[dict]:
-        try:
-            # Validar que program_id sea un UUID válido y no sea el literal 'string'
-            if program_id == 'string':
-                return None
-                
-            try:
-                uuid.UUID(program_id)
-            except ValueError:
-                logging.error(f"ID de programa inválido: {program_id}")
-                return None
 
-            result = self.client.table('programas_academicos')\
-                .select('nombre,descripcion,nivel,modalidad,duracion,creditos')\
-                .eq('id', program_id)\
-                .execute()
-            logging.debug(f"Obteniendo información del programa: {result.data}")
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logging.error(f"Error al obtener información del programa: {e}")
-            return None
-    
-    def update_conversation_status(self, conversation_id: str, status: str):
+    async def get_available_programs(self) -> List[Dict[str, Any]]:
+        """Obtiene la lista de programas disponibles"""
         try:
-            return self.client.table('conversaciones')\
-                .update({'estado': status})\
-                .eq('id', conversation_id)\
-                .execute()
+            result = await asyncio.to_thread(
+                lambda: self.client.table('programas_academicos')
+                    .select('id, nombre')
+                    .execute()
+            )
+            return result.data if result.data else []
+        
         except Exception as e:
-            logging.error(f"Error al actualizar estado de conversación: {e}")
-            raise
+            logger.error(f"Error al obtener programas disponibles: {e}")
+            return []
+
+    async def get_study_plan(self, programa_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene el plan de estudios de un programa"""
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table('planes_estudio')
+                    .select('*')
+                    .eq('programa_id', programa_id)
+                    .single()
+                    .execute()
+            )
+            return result.data if result else None
+        
+        except Exception as e:
+            logger.error(f"Error al obtener plan de estudios: {e}")
+            return None
+
+    async def get_program_info(self, programa_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene información detallada de un programa"""
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table('programas_academicos')
+                    .select('*')
+                    .eq('id', programa_id)
+                    .single()
+                    .execute()
+            )
+            return result.data if result else None
+        
+        except Exception as e:
+            logger.error(f"Error al obtener información del programa: {e}")
+            return None

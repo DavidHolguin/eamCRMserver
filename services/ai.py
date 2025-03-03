@@ -32,12 +32,9 @@ class AIService:
             # Preparar el contexto y el mensaje
             prompt = self._prepare_prompt(context, history[-3:], message)
             
-            # Generar respuesta de forma asíncrona
-            response = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                self._generate_response_sync,
-                prompt
-            )
+            # Generar respuesta usando asyncio.to_thread directamente
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, self._generate_response_sync, prompt)
             
             # Validar y limpiar la respuesta
             cleaned_response = self._clean_response(response)
@@ -47,29 +44,35 @@ class AIService:
             logger.error("Timeout al generar respuesta de IA")
             return "Lo siento, estoy tardando demasiado en responder. ¿Podrías reformular tu pregunta de forma más específica?"
         except Exception as e:
-            logger.error(f"Error al generar respuesta de IA: {e}")
+            logger.error(f"Error al generar respuesta de IA: {e}", exc_info=True)
             return "Lo siento, tuve un problema al procesar tu mensaje. ¿Podrías intentarlo de nuevo?"
 
     def _prepare_prompt(self, context: str, history: List[str], message: str) -> List:
         """Prepara el prompt para el modelo"""
-        messages = [SystemMessage(content=context)]
-        
-        # Agregar historial limitado
-        for msg in history:
-            messages.append(HumanMessage(content=msg))
-        
-        # Agregar mensaje actual
-        messages.append(HumanMessage(content=message))
-        
-        return messages
+        try:
+            messages = [SystemMessage(content=context)]
+            
+            # Agregar historial limitado
+            for msg in history:
+                messages.append(HumanMessage(content=msg))
+            
+            # Agregar mensaje actual
+            messages.append(HumanMessage(content=message))
+            
+            return messages
+        except Exception as e:
+            logger.error(f"Error al preparar prompt: {e}", exc_info=True)
+            raise
 
     def _generate_response_sync(self, messages) -> str:
         """Método sincrónico para generar respuesta"""
         try:
             response = self.model.invoke(messages)
+            if not response or not response.content:
+                raise ValueError("Respuesta vacía del modelo")
             return response.content
         except Exception as e:
-            logger.error(f"Error en _generate_response_sync: {e}")
+            logger.error(f"Error en _generate_response_sync: {e}", exc_info=True)
             raise
 
     def _clean_response(self, response: str) -> str:
